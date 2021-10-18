@@ -30,7 +30,7 @@ process artic_guppyplex {
 
   output:
     tuple env(name), path("*.fastq") into polish_files
-    path("*_guppyplex.log") into guppyplex_summary_queue
+    path("guppyplex_*.tsv") into guppyplex_summary_queue
 
   shell:
     '''
@@ -42,7 +42,7 @@ process artic_guppyplex {
     --max-length !{params.max_length} \
     --directory . \
     --output ${name}.fastq \
-    | tee ${name}_guppyplex.log
+    | tee guppyplex_${name}.tsv
     '''
 }
 
@@ -86,7 +86,7 @@ process coverage_check {
     tuple val(name), path(fasta), path(fail_vcf), path(pass_vcf), path(bam) from coverage_queue
 
   output:
-    path "*covQC.log" into coverage_summary_queue
+    path "covQC_*" into coverage_summary_queue
     tuple val(name), path("pass/*.consensus.fasta"), path("pass/*.fail.vcf"), path("pass/*.pass.vcf"), path("pass/*.primertrimmed.rg.sorted.bam") optional true into vadr_queue
     tuple val(name), path("fail/*.consensus.fasta"), path("fail/*.fail.vcf"), path("fail/*.pass.vcf"), path("fail/*.primertrimmed.rg.sorted.bam") optional true
 
@@ -97,20 +97,19 @@ process coverage_check {
     min_bases=26913
     
     seqkit -is replace -p "^n+|n+\$" -r "" !{fasta} > temp_assembly.fa
-    char_count=$(seqkit stats -G N -a -T temp_assembly.fa | cut -f 5 | tail -1)
-    n_count=$(seqkit stats -G N -a -T temp_assembly.fa | cut -f 12 | tail -1)
+    mv temp_assembly.fa !{fasta}
+    char_count=$(seqkit stats -G N -a -T !{fasta} | cut -f 5 | tail -1)
+    n_count=$(seqkit stats -G N -a -T !{fasta} | cut -f 12 | tail -1)
     percent=$(echo "scale=4; (($char_count-$n_count)/29903)*100" | bc -l)
     
     if [[ 1 == $(echo "($char_count-$n_count)>=$min_bases" | bc) ]]
     then
-      echo -e "!{name}\tPass\t${percent}" 2>&1 > !{name}_covQC.log
+      echo -e "!{name},Pass,${percent}" 2>&1 > covQC_!{name}.csv
       mv !{fasta} !{fail_vcf} !{pass_vcf} !{bam} ./pass
     else
-      echo -e "!{name}\tFail\t${percent}" 2>&1 > !{name}_covQC.log
+      echo -e "!{name},Fail,${percent}" 2>&1 > covQC_!{name}.csv
       mv !{fasta} !{fail_vcf} !{pass_vcf} !{bam} ./fail
     fi
-    
-    rm temp_assembly.fa
     '''
 }
 
@@ -124,11 +123,12 @@ process guppyplex_collect {
     path(guppyplex_log) from guppyplex_summary_queue.collect()
 
   output:
-    path "*_guppyplex.log"
+    path "guppyplex_*.tsv"
 
   shell:
     '''
-    cat *_guppyplex.log > !{params.run_name}_guppyplex.log
+    cat guppyplex_* > guppyplex_!{params.run_name}.tsv
+    sed -i 's/\t/,/g' guppyplex_!{params.run_name}.tsv
     '''
 }
 
@@ -142,11 +142,11 @@ process coverage_collect {
     path(cov_log) from coverage_summary_queue.collect()
 
   output:
-    path "${params.run_name}_covQC.log"
+    path "covQC_${params.run_name}.csv"
 
   shell:
     '''
-       cat *_covQC.log | sed  "s/_!{params.run_name}//g" > !{params.run_name}_covQC.log
+       cat covQC* | sed  "s/_!{params.run_name}//g" > covQC_!{params.run_name}.csv
     '''
 }
 
