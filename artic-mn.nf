@@ -86,7 +86,7 @@ process coverage_check {
     tuple val(name), path(fasta), path(fail_vcf), path(pass_vcf), path(bam) from coverage_queue
 
   output:
-    path "covQC_*" into coverage_summary_queue
+    path "single_covQC_*" into coverage_summary_queue
     tuple val(name), path("pass/*.consensus.fasta"), path("pass/*.fail.vcf"), path("pass/*.pass.vcf"), path("pass/*.primertrimmed.rg.sorted.bam") optional true into vadr_queue
     tuple val(name), path("fail/*.consensus.fasta"), path("fail/*.fail.vcf"), path("fail/*.pass.vcf"), path("fail/*.primertrimmed.rg.sorted.bam") optional true
 
@@ -104,10 +104,10 @@ process coverage_check {
     
     if [[ 1 == $(echo "($char_count-$n_count)>=$min_bases" | bc) ]]
     then
-      echo -e "!{name},Pass,${percent}" 2>&1 > covQC_!{name}.csv
+      echo -e "!{name},Pass,${percent},Confirmed" 2>&1 > single_covQC_!{name}.csv
       mv !{fasta} !{fail_vcf} !{pass_vcf} !{bam} ./pass
     else
-      echo -e "!{name},Fail,${percent}" 2>&1 > covQC_!{name}.csv
+      echo -e "!{name},Fail,${percent},Probable" 2>&1 > single_covQC_!{name}.csv
       mv !{fasta} !{fail_vcf} !{pass_vcf} !{bam} ./fail
     fi
     '''
@@ -123,12 +123,12 @@ process guppyplex_collect {
     path(guppyplex_log) from guppyplex_summary_queue.collect()
 
   output:
-    path "guppyplex_*.tsv"
+    path "guppyplex_*.csv"
 
   shell:
     '''
-    cat guppyplex_* > guppyplex_!{params.run_name}.tsv
-    sed -i 's/\t/,/g' guppyplex_!{params.run_name}.tsv
+    cat guppyplex_* > guppyplex_!{params.run_name}.csv
+    sed -i 's/\t/,/g' guppyplex_!{params.run_name}.csv
     '''
 }
 
@@ -146,7 +146,8 @@ process coverage_collect {
 
   shell:
     '''
-       cat covQC* | sed  "s/_!{params.run_name}//g" > covQC_!{params.run_name}.csv
+       echo -e "accession,status,perc_genome,prob/conf" > covQC_!{params.run_name}.csv
+       cat single_covQC_* | sed  "s/_!{params.run_name}//g" >> covQC_!{params.run_name}.csv
     '''
 }
 
