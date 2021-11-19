@@ -218,12 +218,16 @@ process pangolin_typing {
 
   output:
   path "lineage_report_*.csv"
+  path "usher_lineage_report_*.csv"
   path "harvest_*.csv"
 
   shell:
     '''
     cat *.fasta > all_assemblies.fasta
-    pangolin all_assemblies.fasta --outfile lineage_report_!{params.run_name}.csv
+    pangolin -t 8 all_assemblies.fasta --outfile lineage_report_!{params.run_name}.csv
+
+    # Again, this time using usher
+    pangolin -t 8 --usher all_assemblies.fasta --outfile usher_lineage_report_!{params.run_name}.csv
 
     # Make a Harvest LIMS compatiable lineage file
     echo "taxon,Key,lineage,pangoLEARN,quality" > harvest_!{params.run_name}.csv

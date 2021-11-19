@@ -28,9 +28,9 @@ export NXF_OFFLINE='TRUE'
 
 run_name=$(basename $(pwd))
 
-nextflow /home/mdh/shared/software_modules/artic-mn/artic-mn/dev-artic-mn.nf \
+nextflow /home/mdh/shared/software_modules/artic-mn/artic-mn/artic-mn.nf \
   ${extra_config} \
-  -c /home/mdh/shared/software_modules/artic-mn/artic-mn/dev-artic-mn.config \
+  -c /home/mdh/shared/software_modules/artic-mn/artic-mn/artic-mn.config \
   --primers ${primerset} \
   --fastq_dir fastq_pass/ \
   -with-report ${run_name}/nf_report.html \
@@ -48,7 +48,7 @@ then
 fi
 
 # Remove pangolin
-rm /panfs/roc/groups/7/mdh/shared/software_modules/artic-mn/containers/${USER}/staphb-pangolin-latest.img
+rm ./work/singularity/staphb-pangolin-latest.img
 
 # Adjust permissions
 chmod -R 775 ../${run_name}
