@@ -24,6 +24,8 @@ Channel
 
 // run guppyplex to filer on read length, assume quality was checked during basecalling
 process artic_guppyplex {
+  errorStrategy 'retry'
+  maxRetries 1
 
   input:
     path(reads) from demultiplexed_reads
@@ -193,10 +195,10 @@ process vadr {
     --mdir /opt/vadr/vadr-models/ \
     trimmed.fasta !{name}_vadr
 
-    /opt/vadr/vadr/miniscripts/vadr-map-model-coords.pl\
-    !{name}_vadr/!{name}_vadr".vadr.alt.list" \
-    /opt/vadr/vadr-models/sarscov2.mmap  NC_045512 \
-    1> !{name}_vadr/!{name}_vadr".vadr.alt.coords"
+    #/opt/vadr/vadr/miniscripts/vadr-map-model-coords.pl\
+    #!{name}_vadr/!{name}_vadr".vadr.alt.list" \
+    #/opt/vadr/vadr-models/sarscov2.mmap  NC_045512 \
+    #1> !{name}_vadr/!{name}_vadr".vadr.alt.coords"
 
     if [ -s !{name}_vadr/!{name}_vadr.vadr.pass.list ]
     then
