@@ -16,6 +16,9 @@ params.run_name = workflow.launchDir.getName()
 
 
 
+
+
+
 Channel
     .fromPath( "${params.fastq_dir}/*.fastq.gz")
     .ifEmpty { exit 1, "Cannot find any fastq files in: ${params.fastq_dir}" }
@@ -31,21 +34,24 @@ process artic_guppyplex {
     path(reads) from demultiplexed_reads
 
   output:
-    tuple env(name), path("*.fastq") into polish_files
-    path("guppyplex_*.tsv") into guppyplex_summary_queue
+    tuple env(name), env(subrun), env(guppyplex_count), path("guppyplex_*.tsv") into guppyplex_results
+    tuple env(name), env(subrun), path("*.fastq") into guppyplexed_reads
 
   shell:
-    '''
-    name=$(basename -s '.fastq.gz' !{reads})
+'''
+name=$(basename -s '.fastq.gz' !{reads})
+subrun=$(echo $name | cut -d"_" -f2-)
 
-    artic guppyplex \
-    --skip-quality-check \
-    --min-length !{params.min_length} \
-    --max-length !{params.max_length} \
-    --directory . \
-    --output ${name}.fastq \
-    | tee guppyplex_${name}.tsv
-    '''
+artic guppyplex \
+--skip-quality-check \
+--min-length !{params.min_length} \
+--max-length !{params.max_length} \
+--directory . \
+--output ${name}.fastq \
+| tee guppyplex_${name}.tsv
+
+guppyplex_count=$(cut -f2 guppyplex_${name}.tsv)
+'''
 }
 
 // run artic minion with medaka to create assemblies, vcfs, and bams
@@ -56,187 +62,455 @@ process artic_medaka_pipeline {
   maxRetries 1
 
   input:
-    tuple val(name), path(fastq) from polish_files
+    tuple val(name), val(subrun), path(fastq) from guppyplexed_reads
 
   output:
-    path "*{.primertrimmed.rg.sorted.bam,.vcf.gz,.fail.vcf}"
-    path("*.consensus.fasta") into typing_queue
-    tuple val(name), path("*.consensus.fasta"), path("*.fail.vcf"), path("*.pass.vcf"), path("*.primertrimmed.rg.sorted.bam") into coverage_queue
+    tuple env(name), path("*.fail.vcf"), path("*.pass.vcf"), path("*.primertrimmed.rg.sorted.bam") into artic_medaka_results
+    tuple env(name), path("*.consensus.fasta") into coverage_queue
 
   shell:
-    '''
-    artic minion \
-    --min-depth 50
-    --medaka --medaka-model !{params.medaka_model} \
-    --normalise !{params.normalise} \
-    --threads !{task.cpus} \
-    --scheme-directory /primer-schemes \
-    --read-file !{fastq} \
-    SARS-CoV-2/!{params.primers} \
-    !{name}
-    '''
+'''
+name=!{name}
+subrun=!{subrun}
+artic minion \
+--min-depth 50 \
+--medaka --medaka-model !{params.medaka_model} \
+--normalise !{params.normalise} \
+--threads !{task.cpus} \
+--scheme-directory /primer-schemes \
+--read-file !{fastq} \
+SARS-CoV-2/!{params.primers} \
+!{name}
+'''
 }
 
-// Check breadth of coverage on assemblies, only send >~90% complete to vadr
+// Trim ends and check breadth of coverage on assemblies
 process coverage_check {
   tag "$name"
-
-  publishDir "${params.outdir}/assemblies/", mode: 'copy', pattern: 'fail/*.consensus.fasta*'
-  publishDir "${params.outdir}/vcfs/", mode: 'copy', pattern: 'fail/*.vcf*'
-  publishDir "${params.outdir}/alignments/", mode: 'copy', pattern: 'fail/*.bam*'
+  
+  stageInMode 'copy'
 
   input:
-    tuple val(name), path(fasta), path(fail_vcf), path(pass_vcf), path(bam) from coverage_queue
+    tuple val(name), path(fasta)from coverage_queue
 
   output:
-    path "single_covQC_*" into coverage_summary_queue
-    tuple val(name), path("pass/*.consensus.fasta"), path("pass/*.fail.vcf"), path("pass/*.pass.vcf"), path("pass/*.primertrimmed.rg.sorted.bam") optional true into vadr_queue
-    tuple val(name), path("fail/*.consensus.fasta"), path("fail/*.fail.vcf"), path("fail/*.pass.vcf"), path("fail/*.primertrimmed.rg.sorted.bam") optional true
+    tuple env(name), path("${name}.fasta"), env(cov_perc), env(cov_qc), env(cov_conf) into coverage_results
+    tuple env(name), path("${name}.fasta") into vadr_queue
+    tuple env(name), path("${name}.fasta") into pangolin_queue
+    env(NTCA_status) into NTCA_queue optional true
+    env(NTCB_status) into NTCB_queue optional true
+
 
   shell:
-    '''
-    mkdir pass
-    mkdir fail
-    min_bases=26913
-    
-    seqkit -is replace -p "^n+|n+\$" -r "" !{fasta} > temp_assembly.fa
-    mv temp_assembly.fa !{fasta}
-    char_count=$(seqkit stats -G N -a -T !{fasta} | cut -f 5 | tail -1)
-    n_count=$(seqkit stats -G N -a -T !{fasta} | cut -f 12 | tail -1)
-    percent=$(echo "scale=4; (($char_count-$n_count)/29903)*100" | bc -l)
-    
-    if [[ 1 == $(echo "($char_count-$n_count)>=$min_bases" | bc) ]]
-    then
-      echo -e "!{name},Pass,${percent},Confirmed" 2>&1 > single_covQC_!{name}.csv
-      mv !{fasta} !{fail_vcf} !{pass_vcf} !{bam} ./pass
-    else
-      echo -e "!{name},Fail,${percent},Probable" 2>&1 > single_covQC_!{name}.csv
-      mv !{fasta} !{fail_vcf} !{pass_vcf} !{bam} ./fail
-    fi
-    '''
+'''
+name=!{name}
+sid=$(echo "!{name}" | cut -d"_" -f 1)
+min_bases=26913
+
+pretrim_char_count=$(seqkit stats -G N -a -T !{fasta} | cut -f 5 | tail -1)
+pretrim_n_count=$(seqkit stats -G N -a -T !{fasta} | cut -f 12 | tail -1)
+
+# Check trimming to make sure there is a sequence in the output fasta
+if [[ 1 == $(echo "($pretrim_char_count-$pretrim_n_count)==0" | bc) ]]
+then
+  echo "This fasta is empty! Lets add some filler."
+  seqkit -is replace -p "^n+|n+\$" -r "NNN" !{fasta} > !{name}.fasta
+else
+  echo "This fasta has actual sequence in it. Lets trim the Ns off the ends."
+  seqkit -is replace -p "^n+|n+\$" -r "" !{fasta} > !{name}.fasta
+fi
+
+# Trim terminal Ns and calculate coverage
+char_count=$(seqkit stats -G N -a -T !{name}.fasta | cut -f 5 | tail -1)
+n_count=$(seqkit stats -G N -a -T !{name}.fasta | cut -f 12 | tail -1)
+cov_perc=$(echo "scale=4; (($char_count-$n_count)/29903)*100" | bc -l)
+
+if [[ 1 == $(echo "($char_count-$n_count)>=$min_bases" | bc) ]]
+then
+  cov_qc="Pass";
+  cov_conf="Confirmed"
+else
+  cov_qc="Fail";
+  cov_conf="Probable"
+fi
+
+# Handle NTCA status
+if [ "${sid}" = "NTC-A" ]; then
+  if [[ 1 == $(echo "($cov_perc) >= 10" | bc) ]]; then
+    NTCA_status="Fail";
+  else
+    NTCA_status="Pass"
+  fi
+fi
+
+# Handle NTCB status
+if [ "${sid}" = "NTC-B" ]; then
+  if [[ 1 == $(echo "($cov_perc) >= 10" | bc) ]]; then
+    NTCB_status="Fail";
+  else
+    NTCB_status="Pass"
+  fi
+fi
+'''
 }
 
-// Summarize guppyplex post-filtering read counts
-process guppyplex_collect {
-  tag "$params.run_name"
+// Convert NTCA and NTCB queues into value channels, set as not found as needed
+NTCA_value = NTCA_queue.first().ifEmpty("NTC-A not found")
+NTCB_value = NTCB_queue.first().ifEmpty("NTC-B not found")
 
-  publishDir "${params.outdir}", mode: 'copy'
-
-  input:
-    path(guppyplex_log) from guppyplex_summary_queue.collect()
-
-  output:
-    path "guppyplex_*.csv"
-
-  shell:
-    '''
-    cat guppyplex_* > guppyplex_!{params.run_name}.csv
-    sed -i 's/\t/,/g' guppyplex_!{params.run_name}.csv
-    '''
-}
-
-// summarize breadth of coverage
-process coverage_collect {
-  tag "$params.run_name"
-
-  publishDir "${params.outdir}", mode: 'copy'
-
-  input:
-    path(cov_log) from coverage_summary_queue.collect()
-
-  output:
-    path "covQC_${params.run_name}.csv"
-
-  shell:
-    '''
-       echo -e "accession,status,perc_genome,prob/conf" > covQC_!{params.run_name}.csv
-       cat single_covQC_* | sed  "s/_!{params.run_name}//g" >> covQC_!{params.run_name}.csv
-    '''
-}
-
-// run vadr and sort genomes that need review
+// run vadr, flag genomes needing review
 process vadr {
   tag "$name"
 
-  publishDir "${params.outdir}/assemblies/", mode: 'copy', pattern: 'pass/*.consensus.fasta*'
-  publishDir "${params.outdir}/vcfs/", mode: 'copy', pattern: 'pass/*.vcf*'
-  publishDir "${params.outdir}/alignments/", mode: 'copy', pattern: 'pass/*.bam*'
-  publishDir "${params.outdir}/vadr/", mode: 'copy', pattern: 'pass/*_vadr', type: 'dir'
-  publishDir "${params.outdir}/assemblies/", mode: 'copy', pattern: 'review/*.consensus.fasta*'
-  publishDir "${params.outdir}/vcfs/", mode: 'copy', pattern: 'review/*.vcf*'
-  publishDir "${params.outdir}/alignments/", mode: 'copy', pattern: 'review/*.bam*'
-  publishDir "${params.outdir}/vadr/", mode: 'copy', pattern: 'review/*_vadr', type: 'dir'
-
   input:
-    tuple val(name), path(fasta), path(fail_vcf), path(pass_vcf), path(bam) from coverage_queue from vadr_queue
+    tuple val(name), path(fasta) from vadr_queue
 
   output:
-    tuple val(name), path("pass/*.consensus.fasta"), path("pass/*.fail.vcf"), path("pass/*.pass.vcf"), path("pass/*.primertrimmed.rg.sorted.bam"), path("pass/*_vadr") optional true
-    tuple val(name), path("review/*.consensus.fasta"), path("review/*.fail.vcf"), path("review/*.pass.vcf"), path("review/*.primertrimmed.rg.sorted.bam"), path("review/*_vadr") optional true
+    tuple env(name), env(vadr_status), path("*_vadr.tar.gz"), path("${name}/${name}.vadr.alt.list") into vadr_results
 
   shell:
-    '''
-    mkdir pass
-    mkdir review
-    
-    /opt/vadr/vadr/miniscripts/fasta-trim-terminal-ambigs.pl \
-    --minlen 50 \
-    --maxlen 30000 \
-    !{fasta} 1> trimmed.fasta
+'''
+name=!{name}
 
-    v-annotate.pl \
-    --split \
-    --cpu !{task.cpus} \
-    --glsearch -s -r \
-    --nomisc \
-    --mkey sarscov2 \
-    --lowsim5seq 6 \
-    --lowsim3seq 6 \
-    --alt_fail lowscore,insertnn,deletinn \
-    --mdir /opt/vadr/vadr-models/ \
-    trimmed.fasta !{name}_vadr
+/opt/vadr/vadr/miniscripts/fasta-trim-terminal-ambigs.pl \
+--minlen 50 \
+--maxlen 30000 \
+!{fasta} 1> trimmed.fasta
 
-    #/opt/vadr/vadr/miniscripts/vadr-map-model-coords.pl\
-    #!{name}_vadr/!{name}_vadr".vadr.alt.list" \
-    #/opt/vadr/vadr-models/sarscov2.mmap  NC_045512 \
-    #1> !{name}_vadr/!{name}_vadr".vadr.alt.coords"
+if [ -s trimmed.fasta ]
+then
+  v-annotate.pl \
+  --split \
+  --cpu !{task.cpus} \
+  --glsearch -s -r \
+  --nomisc \
+  --mkey sarscov2 \
+  --lowsim5seq 6 \
+  --lowsim3seq 6 \
+  --alt_fail lowscore,insertnn,deletinn \
+  --mdir /opt/vadr/vadr-models/ \
+  trimmed.fasta !{name}
 
-    if [ -s !{name}_vadr/!{name}_vadr.vadr.pass.list ]
-    then
-      mv !{fasta} !{fail_vcf} !{pass_vcf} !{bam} !{name}_vadr ./pass
-    else
-      mv !{fasta} !{fail_vcf} !{pass_vcf} !{bam} !{name}_vadr ./review
-    fi
-    '''
+else
+  mkdir !{name}
+  echo "Vadr not run, zero coverage" > !{name}/no_coverage.txt
+  echo "Vadr not run, zero coverage" > !{name}/!{name}.vadr.alt.list
+fi
+
+
+if [ -s !{name}/!{name}.vadr.pass.list ]
+then
+  vadr_status="Pass"
+else
+  vadr_status="Fail"
+fi
+
+tar -zcvf !{name}_vadr.tar.gz !{name}
+'''
 }
 
-// run pangolin, and create a data-drop file for Harvest LIMS
+// run pangolin
 process pangolin_typing {
-  tag "$params.run_name"
+  tag "$name"
 
-  publishDir "${params.outdir}", mode: 'copy'
+  publishDir "${params.outdir}/pangolin", mode: 'copy'
 
   input:
-  path(assembly) from typing_queue.collect()
+  tuple val(name), path(fasta) from pangolin_queue
 
   output:
-  path "lineage_report_*.csv"
-  path "usher_lineage_report_*.csv"
-  path "harvest_*.csv"
+  tuple env(name), path("plearn_lineage_report_*.csv"), path ("pusher_lineage_report_*.csv") into pangolin_files
+
+  tuple env(name), \
+  env(plearn_lineage), \
+  env(plearn_scorpio), \
+  env(plearn_version), \
+  env(plearn_pangolin_ver), \
+  env(plearn_pangoLEARN_ver), \
+  env(plearn_pango_ver), \
+  env(plearn_status), \
+  env(plearn_note), \
+  env(pusher_lineage), \
+  env(pusher_version), \
+  env(pusher_status), \
+  env(pusher_note), \
+  env(pangolin_agreement)  into pangolin_results
 
   shell:
-    '''
-    cat *.fasta > all_assemblies.fasta
-    pangolin -t 8 all_assemblies.fasta --outfile lineage_report_!{params.run_name}.csv
+'''
+name=!{name}
 
-    # Again, this time using usher
-    pangolin -t 8 --usher all_assemblies.fasta --outfile usher_lineage_report_!{params.run_name}.csv
+pangolin -t 1 !{fasta} --outfile plearn_lineage_report_!{fasta}.csv
+plearn_lineage=$(tail -n 1 plearn_lineage_report_!{fasta}.csv | cut -d, -f 2)
+plearn_scorpio=$(tail -n 1 plearn_lineage_report_!{fasta}.csv | cut -d, -f 5)
+plearn_version=$(tail -n 1 plearn_lineage_report_!{fasta}.csv | cut -d, -f 8)
+plearn_pangolin_ver=$(tail -n 1 plearn_lineage_report_!{fasta}.csv | cut -d, -f 9)
+plearn_pangoLEARN_ver=$(tail -n 1 plearn_lineage_report_!{fasta}.csv | cut -d, -f 10)
+plearn_pango_ver=$(tail -n 1 plearn_lineage_report_!{fasta}.csv | cut -d, -f 11)
+plearn_status=$(tail -n 1 plearn_lineage_report_!{fasta}.csv | cut -d, -f 12)
+plearn_note=$(tail -n 1 plearn_lineage_report_!{fasta}.csv | cut -d, -f 13)
 
-    # Make a Harvest LIMS compatiable lineage file
-    echo "taxon,Key,lineage,pangoLEARN,quality" > harvest_!{params.run_name}.csv
-    awk 'BEGIN {FS=",";OFS=","} NR>1 {print $1,substr($1,1,9),$2,substr($10,6,2)"/"substr($10,9,2)"/"substr($10,1,4),$12}' lineage_report_!{params.run_name}.csv >> harvest_!{params.run_name}.csv
-    perl -pi -e "s/\\n/\\r\\n/" harvest_!{params.run_name}.csv
+# Again, this time using usher
+pangolin -t 1 --usher !{fasta} --outfile pusher_lineage_report_!{fasta}.csv
+pusher_lineage=$(tail -n 1 pusher_lineage_report_!{fasta}.csv | cut -d, -f 2)
+pusher_version=$(tail -n 1 pusher_lineage_report_!{fasta}.csv | cut -d, -f 8)
+pusher_status=$(tail -n 1 pusher_lineage_report_!{fasta}.csv | cut -d, -f 12)
+pusher_note=$(tail -n 1 pusher_lineage_report_!{fasta}.csv | cut -d, -f 13)
 
-    rm all_assemblies.fasta
-  '''
+# Check if two pangolin algos agree
+if [ $plearn_lineage == $pusher_lineage ]
+then  
+  pangolin_agreement="True"
+else
+  pangolin_agreement="False"
+fi
+
+# Fix sometimes blank outputs
+if [ -z "${plearn_scorpio}" ]
+then
+  plearn_scorpio="null"
+fi
+if [ -z" ${plearn_note}" ]; then
+  plearn_note="null"
+fi
+if [ -z "${pusher_note}" ]; then
+  pusher_note="null"
+fi
+'''
+}
+
+
+sample_summary_queue = guppyplex_results.join(artic_medaka_results).join(coverage_results).join(vadr_results).join(pangolin_results)
+
+
+process sample_summary {
+  tag "$name"
+  
+  publishDir "${params.outdir}/assemblies/", mode: 'copy', pattern: 'pass/*.fasta*'
+  publishDir "${params.outdir}/assemblies/", mode: 'copy', pattern: 'fail/*.fasta*'
+  publishDir "${params.outdir}/assemblies/", mode: 'copy', pattern: 'review/*.fasta*'
+  publishDir "${params.outdir}/assemblies/", mode: 'copy', pattern: 'NTC_fail/*.fasta*'
+  publishDir "${params.outdir}/vcfs/", mode: 'copy', pattern: 'pass/*.vcf*'
+  publishDir "${params.outdir}/vcfs/", mode: 'copy', pattern: 'fail/*.vcf*'
+  publishDir "${params.outdir}/vcfs/", mode: 'copy', pattern: 'review/*.vcf*'
+  publishDir "${params.outdir}/vcfs/", mode: 'copy', pattern: 'NTC_fail/*.vcf*'
+  publishDir "${params.outdir}/alignments/", mode: 'copy', pattern: 'pass/*.bam*'
+  publishDir "${params.outdir}/alignments/", mode: 'copy', pattern: 'fail/*.bam*'
+  publishDir "${params.outdir}/alignments/", mode: 'copy', pattern: 'review/*.bam*'
+  publishDir "${params.outdir}/alignments/", mode: 'copy', pattern: 'NTC_fail/*.bam*'
+  publishDir "${params.outdir}/guppyplex/", mode: 'copy', pattern: 'pass/guppyplex_*'
+  publishDir "${params.outdir}/guppyplex/", mode: 'copy', pattern: 'fail/guppyplex_*'
+  publishDir "${params.outdir}/guppyplex/", mode: 'copy', pattern: 'review/guppyplex_*'
+  publishDir "${params.outdir}/guppyplex/", mode: 'copy', pattern: 'NTC_fail/guppyplex_*'
+  publishDir "${params.outdir}/vadr/zips/", mode: 'copy', pattern: 'pass/*_vadr.tar.gz'
+  publishDir "${params.outdir}/vadr/zips/", mode: 'copy', pattern: 'fail/*_vadr.tar.gz'
+  publishDir "${params.outdir}/vadr/zips/", mode: 'copy', pattern: 'review/*_vadr.tar.gz'
+  publishDir "${params.outdir}/vadr/zips/", mode: 'copy', pattern: 'NTC_fail/*_vadr.tar.gz'
+  publishDir "${params.outdir}/vadr/", mode: 'copy', pattern: 'pass/*.vadr.alt.list'
+  publishDir "${params.outdir}/vadr/", mode: 'copy', pattern: 'fail/*.vadr.alt.list'
+  publishDir "${params.outdir}/vadr/", mode: 'copy', pattern: 'review/*.vadr.alt.list'
+  publishDir "${params.outdir}/vadr/", mode: 'copy', pattern: 'NTC_fail/*.vadr.alt.list'
+  //publishDir "${params.outdir}/summary_temp/", mode: 'copy', pattern: '*_harvest.csv*'
+  //publishDir "${params.outdir}/summary_temp/", mode: 'copy', pattern: '*_summary.csv*'
+
+  input:
+  val(NTCA_status) from NTCA_value
+  val(NTCB_status) from NTCB_value
+  tuple val(name), \
+  val(subrun), \
+  val(guppyplex_count), \
+  path(guppyplex_file), \
+  path(fail_vcf), \
+  path(pass_vcf), \
+  path(bam_file), \
+  path(fasta_file), \
+  val(cov_perc), \
+  val(cov_qc), \
+  val(cov_conf), \
+  val(vadr_status), \
+  path(vadr_zip), \
+  path(vadr_list), \
+  val(plearn_lineage), \
+  val(plearn_scorpio), \
+  val(plearn_version), \
+  val(plearn_pangolin_ver), \
+  val(plearn_pangoLEARN_ver), \
+  val(plearn_pango_ver), \
+  val(plearn_status), \
+  val(plearn_note), \
+  val(pusher_lineage), \
+  val(pusher_version), \
+  val(pusher_status), \
+  val(pusher_note), \
+  val(pangolin_agreement) from sample_summary_queue
+
+  output:
+  path ("*_summary.csv") into run_summary
+  path ("*_harvest.csv") into harvest_summary
+  tuple val(name), path("pass/*.fasta"), path("pass/*.fail.vcf"), path("pass/*.pass.vcf"), path("pass/*.primertrimmed.rg.sorted.bam"), path("pass/*_vadr.tar.gz"), path("pass/*vadr.alt.list"), path("pass/guppyplex_*") optional true
+  tuple val(name), path("fail/*.fasta"), path("fail/*.fail.vcf"), path("fail/*.pass.vcf"), path("fail/*.primertrimmed.rg.sorted.bam"), path("fail/*_vadr.tar.gz"), path("fail/*vadr.alt.list"), path("fail/guppyplex_*") optional true
+  tuple val(name), path("review/*.fasta"), path("review/*.fail.vcf"), path("review/*.pass.vcf"), path("review/*.primertrimmed.rg.sorted.bam"), path("review/*_vadr.tar.gz"), path("review/*vadr.alt.list"), path("review/guppyplex_*") optional true
+  tuple val(name), path("NTC_fail/*.fasta"), path("NTC_fail/*.fail.vcf"), path("NTC_fail/*.pass.vcf"), path("NTC_fail/*.primertrimmed.rg.sorted.bam"), path("NTC_fail/*_vadr.tar.gz"), path("NTC_fail/*vadr.alt.list"), path("NTC_fail/guppyplex_*") optional true
+
+  shell:
+'''
+# Create environment variables for each input
+name="!{name}"
+sid=$(echo "!{name}" | cut -d"_" -f 1)
+subrun="!{subrun}"
+guppyplex_count="!{guppyplex_count}"
+guppyplex_file="!{guppyplex_file}"
+vcf_fail="!{fail_vcf}"
+vcf_pass="!{pass_vcf}"
+bam_file="!{bam_file}"
+fasta_file="!{fasta_file}"
+cov_perc="!{cov_perc}"
+cov_qc="!{cov_qc}"
+cov_conf="!{cov_conf}"
+vadr_status="!{vadr_status}"
+vadr_zip="!{vadr_zip}"
+vadr_list="!{vadr_list}"
+plearn_lineage="!{plearn_lineage}"
+plearn_scorpio="!{plearn_scorpio}"
+plearn_version="!{plearn_version}"
+plearn_pangolin_ver="!{plearn_pangolin_ver}"
+plearn_pangoLEARN_ver="!{plearn_pangoLEARN_ver}"
+plearn_pango_ver="!{plearn_pango_ver}"
+plearn_status="!{plearn_status}"
+plearn_note="!{plearn_note}"
+pusher_lineage="!{pusher_lineage}"
+pusher_version="!{pusher_version}"
+pusher_status="!{pusher_status}"
+pusher_note="!{pusher_note}"
+pangolin_agreement="!{pangolin_agreement}"
+
+control_set=${subrun: -1}
+
+echo "Control Set: ${control_set}"
+echo "NTC-A: !{NTCA_status}"
+echo "NTC-B: !{NTCB_status}"
+
+echo "My files:"
+echo "name: !{name}"
+echo "sid: ${sid}"
+echo "subrun: !{subrun}"
+echo "guppyplexed_reads: !{guppyplex_count}"
+echo "guppyplex_file: !{guppyplex_file}"
+echo "vcf_fail: !{fail_vcf}"
+echo "vcf_pass: !{pass_vcf}"
+echo "bam_file: !{bam_file}"
+echo "fasta_file: !{fasta_file}"
+echo "cov_perc: !{cov_perc}"
+echo "cov_qc: !{cov_qc}"
+echo "cov_conf: !{cov_conf}"
+echo "vadr_status: !{vadr_status}"
+echo "vadr_zip: !{vadr_zip}"
+echo "vadr_list: !{vadr_list}"
+echo "plearn_lineage: !{plearn_lineage}"
+echo "plearn_scorpio: !{plearn_scorpio}"
+echo "plearn_version: !{plearn_version}"
+echo "plearn_pangolin_ver: !{plearn_pangolin_ver}"
+echo "plearn_pangoLEARN_ver: !{plearn_pangoLEARN_ver}"
+echo "plearn_pango_ver: !{plearn_pango_ver}"
+echo "plearn_status: !{plearn_status}"
+echo "plearn_note: !{plearn_note}"
+echo "pusher_lineage: !{pusher_lineage}"
+echo "pusher_version: !{pusher_version}"
+echo "pusher_status: !{pusher_status}"
+echo "pusher_note: !{pusher_note}"
+echo "pangolin_agreement: !{pangolin_agreement}"
+
+
+# Make result sorting dirs
+mkdir pass
+mkdir fail
+mkdir NTC_fail
+mkdir review
+
+
+if ([ ${control_set} = "A" ] && [ !{NTCA_status} = "Fail" ]) || ([ ${control_set} = "B" ] && [ !{NTCB_status} = "Fail" ]); then
+  echo "NTC control failure, adjusting results summary files"
+  cov_qc="Coverage NTC Failure"
+  cov_conf="Coverage NTC Failure"
+  plearn_lineage="Coverage NTC Failure"
+  plearn_scorpio="Coverage NTC Failure"
+  plearn_version="Coverage NTC Failure"
+  plearn_pangolin_ver="Coverage NTC Failure"
+  plearn_pangoLEARN_ver="Coverage NTC Failure"
+  plearn_pango_ver="Coverage NTC Failure"
+  plearn_status="Coverage NTC Failure"
+  plearn_note="Coverage NTC Failure"
+  pusher_lineage="Coverage NTC Failure"
+  pusher_version="Coverage NTC Failure"
+  pusher_status="Coverage NTC Failure"
+  pusher_note="Coverage NTC Failure"
+  pangolin_agreement="Coverage NTC Failure"
+  mv !{guppyplex_file} !{fail_vcf} !{pass_vcf} !{bam_file} !{fasta_file} !{vadr_zip} !{vadr_list} ./NTC_fail
+elif [ "!{cov_qc}" = "Pass" ]; then
+  if [ "!{vadr_status}" = "Pass" ]; then
+    mv !{guppyplex_file} !{fail_vcf} !{pass_vcf} !{bam_file} !{fasta_file} !{vadr_zip} !{vadr_list} ./pass
+  else
+    mv !{guppyplex_file} !{fail_vcf} !{pass_vcf} !{bam_file} !{fasta_file} !{vadr_zip} !{vadr_list} ./review
+  fi
+else
+  mv !{guppyplex_file} !{fail_vcf} !{pass_vcf} !{bam_file} !{fasta_file} !{vadr_zip} !{vadr_list} ./fail
+fi
+
+# Create summary strings
+echo "${sid},${subrun},${guppyplex_count},${cov_perc},${cov_qc},${cov_conf},${vadr_status},${plearn_lineage},${plearn_scorpio},${plearn_version},${plearn_pangolin_ver},${plearn_pangoLEARN_ver},${plearn_pango_ver},${plearn_status},${plearn_note},${pusher_lineage},${pusher_version},${pusher_status},${pusher_note},${pangolin_agreement}" > !{name}_summary.csv
+
+if  [ "${cov_qc}" = "Pass" ]; then
+  echo "${sid},${plearn_lineage},${plearn_pangoLEARN_ver},${plearn_status},,," > !{name}_harvest.csv
+elif [ "${cov_qc}" = "Coverage NTC Failure" ]; then
+  echo "${sid},${plearn_lineage},${plearn_pangoLEARN_ver},${plearn_status},none,none,none" > !{name}_harvest.csv
+else
+  echo "${sid},${plearn_lineage},${plearn_pangoLEARN_ver},${plearn_status},none,none,none" > !{name}_harvest.csv
+fi
+
+'''
+}
+
+
+// summarize run
+process run_summary {
+  tag "run_summary"
+
+  publishDir "${params.outdir}/", mode: 'copy'
+
+  input:
+  path (summary_files) from run_summary.collect()
+
+  output:
+  path("${params.run_name}_summary.csv")
+
+  shell:
+'''
+echo "id,run,guppyplexed_reads,cov_perc,cov_status,cov_confidence,vadr_status,plearn_lineage,plearn_scorpio,plearn_version,plearn_pangolin_ver,plearn_pangoLEARN_ver,plearn_pango_ver,plearn_status,plearn_note,pusher_lineage,pusher_version,pusher_status,pusher_note,pangolin_agreement" > temp.txt
+
+cat *_summary.csv | sort >> temp.txt
+
+mv temp.txt !{params.run_name}_summary.csv
+'''
+}
+
+// summarize run for harvest
+process harvest_summary {
+  tag "harvest_summary"
+
+  publishDir "${params.outdir}/", mode: 'copy'
+
+  input:
+  path (harvest_files) from harvest_summary.collect()
+
+  output:
+  path("${params.run_name}_harvest.csv")
+
+  shell:
+'''
+echo "key,lineage,pangoLEARN,quality,Virus_ID,GENBANK,GISAID" > temp.txt
+
+cat *_harvest.csv | sort >> temp.txt
+
+mv temp.txt !{params.run_name}_harvest.csv
+'''
 }
