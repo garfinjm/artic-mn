@@ -66,6 +66,7 @@ process artic_medaka_pipeline {
   shell:
     '''
     artic minion \
+    --min-depth 50
     --medaka --medaka-model !{params.medaka_model} \
     --normalise !{params.normalise} \
     --threads !{task.cpus} \
