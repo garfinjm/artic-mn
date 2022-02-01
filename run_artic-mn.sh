@@ -35,7 +35,6 @@ nextflow /home/mdh/shared/software_modules/artic-mn/artic-mn/artic-mn.nf \
   --fastq_dir fastq_pass/ \
   -with-report ${run_name}/nf_report.html \
   -with-trace ${run_name}/nf_trace.tsv \
-  -with-dag ${run_name}/dag.html \
   -resume
 
 # Look for failed samples
