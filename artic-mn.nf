@@ -219,63 +219,37 @@ process pangolin_typing {
   tuple val(name), path(fasta) from pangolin_queue
 
   output:
-  tuple env(name), path("plearn_lineage_report_*.csv"), path ("pusher_lineage_report_*.csv") into pangolin_files
+  tuple env(name), path ("pusher_*.csv") into pangolin_files
 
   tuple env(name), \
-  env(plearn_lineage), \
-  env(plearn_scorpio), \
-  env(plearn_version), \
-  env(plearn_pangolin_ver), \
-  env(plearn_pangoLEARN_ver), \
-  env(plearn_pango_ver), \
-  env(plearn_status), \
-  env(plearn_note), \
   env(pusher_lineage), \
   env(pusher_version), \
   env(pusher_status), \
-  env(pusher_note), \
-  env(pangolin_agreement)  into pangolin_results
+  env(pusher_note) into pangolin_results
 
   shell:
 '''
 name=!{name}
 
-pangolin -t 1 !{fasta} --outfile plearn_lineage_report_!{fasta}.csv
-plearn_lineage=$(tail -n 1 plearn_lineage_report_!{fasta}.csv | cut -d, -f 2)
-plearn_scorpio=$(tail -n 1 plearn_lineage_report_!{fasta}.csv | cut -d, -f 5)
-plearn_version=$(tail -n 1 plearn_lineage_report_!{fasta}.csv | cut -d, -f 8)
-plearn_pangolin_ver=$(tail -n 1 plearn_lineage_report_!{fasta}.csv | cut -d, -f 9)
-plearn_pangoLEARN_ver=$(tail -n 1 plearn_lineage_report_!{fasta}.csv | cut -d, -f 10)
-plearn_pango_ver=$(tail -n 1 plearn_lineage_report_!{fasta}.csv | cut -d, -f 11)
-plearn_status=$(tail -n 1 plearn_lineage_report_!{fasta}.csv | cut -d, -f 12)
-plearn_note=$(tail -n 1 plearn_lineage_report_!{fasta}.csv | cut -d, -f 13)
+pangolin -t 1 --analysis-mode accurate --outfile pusher_!{fasta}.csv !{fasta}
 
-# Again, this time using usher
-pangolin -t 1 --usher !{fasta} --outfile pusher_lineage_report_!{fasta}.csv
-pusher_lineage=$(tail -n 1 pusher_lineage_report_!{fasta}.csv | cut -d, -f 2)
-pusher_version=$(tail -n 1 pusher_lineage_report_!{fasta}.csv | cut -d, -f 8)
-pusher_status=$(tail -n 1 pusher_lineage_report_!{fasta}.csv | cut -d, -f 12)
-pusher_note=$(tail -n 1 pusher_lineage_report_!{fasta}.csv | cut -d, -f 13)
+pusher_lineage=$(tail -n 1 pusher_!{fasta}.csv | cut -d, -f 2)
+pusher_version=$(tail -n 1 pusher_!{fasta}.csv | cut -d, -f 9)
+pusher_status=$(tail -n 1 pusher_!{fasta}.csv | cut -d, -f 14)
+pusher_note=$(tail -n 1 pusher_!{fasta}.csv | cut -d, -f 15)
 
-# Check if two pangolin algos agree
-if [ $plearn_lineage == $pusher_lineage ]
-then  
-  pangolin_agreement="True"
-else
-  pangolin_agreement="False"
-fi
 
 # Fix sometimes blank outputs
-if [ -z "${plearn_scorpio}" ]
-then
-  plearn_scorpio="null"
-fi
-if [ -z" ${plearn_note}" ]; then
-  plearn_note="null"
-fi
-if [ -z "${pusher_note}" ]; then
-  pusher_note="null"
-fi
+#if [ -z "${plearn_scorpio}" ]
+#then
+#  plearn_scorpio="null"
+#fi
+#if [ -z" ${plearn_note}" ]; then
+#  plearn_note="null"
+#fi
+#if [ -z "${pusher_note}" ]; then
+#  pusher_note="null"
+#fi
 '''
 }
 
@@ -310,8 +284,6 @@ process sample_summary {
   publishDir "${params.outdir}/vadr/", mode: 'copy', pattern: 'fail/*.vadr.alt.list'
   publishDir "${params.outdir}/vadr/", mode: 'copy', pattern: 'review/*.vadr.alt.list'
   publishDir "${params.outdir}/vadr/", mode: 'copy', pattern: 'NTC_fail/*.vadr.alt.list'
-  //publishDir "${params.outdir}/summary_temp/", mode: 'copy', pattern: '*_harvest.csv*'
-  //publishDir "${params.outdir}/summary_temp/", mode: 'copy', pattern: '*_summary.csv*'
 
   input:
   val(NTCA_status) from NTCA_value
@@ -330,19 +302,10 @@ process sample_summary {
   val(vadr_status), \
   path(vadr_zip), \
   path(vadr_list), \
-  val(plearn_lineage), \
-  val(plearn_scorpio), \
-  val(plearn_version), \
-  val(plearn_pangolin_ver), \
-  val(plearn_pangoLEARN_ver), \
-  val(plearn_pango_ver), \
-  val(plearn_status), \
-  val(plearn_note), \
   val(pusher_lineage), \
   val(pusher_version), \
   val(pusher_status), \
-  val(pusher_note), \
-  val(pangolin_agreement) from sample_summary_queue
+  val(pusher_note) from sample_summary_queue
 
   output:
   path ("*_summary.csv") into run_summary
@@ -370,19 +333,10 @@ cov_conf="!{cov_conf}"
 vadr_status="!{vadr_status}"
 vadr_zip="!{vadr_zip}"
 vadr_list="!{vadr_list}"
-plearn_lineage="!{plearn_lineage}"
-plearn_scorpio="!{plearn_scorpio}"
-plearn_version="!{plearn_version}"
-plearn_pangolin_ver="!{plearn_pangolin_ver}"
-plearn_pangoLEARN_ver="!{plearn_pangoLEARN_ver}"
-plearn_pango_ver="!{plearn_pango_ver}"
-plearn_status="!{plearn_status}"
-plearn_note="!{plearn_note}"
 pusher_lineage="!{pusher_lineage}"
 pusher_version="!{pusher_version}"
 pusher_status="!{pusher_status}"
 pusher_note="!{pusher_note}"
-pangolin_agreement="!{pangolin_agreement}"
 
 control_set=${subrun: -1}
 
@@ -406,20 +360,10 @@ echo "cov_conf: !{cov_conf}"
 echo "vadr_status: !{vadr_status}"
 echo "vadr_zip: !{vadr_zip}"
 echo "vadr_list: !{vadr_list}"
-echo "plearn_lineage: !{plearn_lineage}"
-echo "plearn_scorpio: !{plearn_scorpio}"
-echo "plearn_version: !{plearn_version}"
-echo "plearn_pangolin_ver: !{plearn_pangolin_ver}"
-echo "plearn_pangoLEARN_ver: !{plearn_pangoLEARN_ver}"
-echo "plearn_pango_ver: !{plearn_pango_ver}"
-echo "plearn_status: !{plearn_status}"
-echo "plearn_note: !{plearn_note}"
 echo "pusher_lineage: !{pusher_lineage}"
 echo "pusher_version: !{pusher_version}"
 echo "pusher_status: !{pusher_status}"
 echo "pusher_note: !{pusher_note}"
-echo "pangolin_agreement: !{pangolin_agreement}"
-
 
 # Make result sorting dirs
 mkdir pass
@@ -432,19 +376,10 @@ if ([ ${control_set} = "A" ] && [ !{NTCA_status} = "Fail" ]) || ([ ${control_set
   echo "NTC control failure, adjusting results summary files"
   cov_qc="Coverage NTC Failure"
   cov_conf="Coverage NTC Failure"
-  plearn_lineage="Coverage NTC Failure"
-  plearn_scorpio="Coverage NTC Failure"
-  plearn_version="Coverage NTC Failure"
-  plearn_pangolin_ver="Coverage NTC Failure"
-  plearn_pangoLEARN_ver="Coverage NTC Failure"
-  plearn_pango_ver="Coverage NTC Failure"
-  plearn_status="Coverage NTC Failure"
-  plearn_note="Coverage NTC Failure"
   pusher_lineage="Coverage NTC Failure"
   pusher_version="Coverage NTC Failure"
   pusher_status="Coverage NTC Failure"
   pusher_note="Coverage NTC Failure"
-  pangolin_agreement="Coverage NTC Failure"
   mv !{guppyplex_file} !{fail_vcf} !{pass_vcf} !{bam_file} !{fasta_file} !{vadr_zip} !{vadr_list} ./NTC_fail
 elif [ "!{cov_qc}" = "Pass" ]; then
   if [ "!{vadr_status}" = "Pass" ]; then
@@ -457,14 +392,14 @@ else
 fi
 
 # Create summary strings
-echo "${sid},${subrun},${guppyplex_count},${cov_perc},${cov_qc},${cov_conf},${vadr_status},${plearn_lineage},${plearn_scorpio},${plearn_version},${plearn_pangolin_ver},${plearn_pangoLEARN_ver},${plearn_pango_ver},${plearn_status},${plearn_note},${pusher_lineage},${pusher_version},${pusher_status},${pusher_note},${pangolin_agreement}" > !{name}_summary.csv
+echo "${sid},${subrun},${guppyplex_count},${cov_perc},${cov_qc},${cov_conf},${vadr_status},${pusher_lineage},${pusher_version},${pusher_status},${pusher_note}" > !{name}_summary.csv
 
 if  [ "${cov_qc}" = "Pass" ]; then
-  echo "${sid},${plearn_lineage},${plearn_pangoLEARN_ver},${plearn_status},,," > !{name}_harvest.csv
+  echo "${sid},${pusher_lineage},${pusher_version},${pusher_status},,," > !{name}_harvest.csv
 elif [ "${cov_qc}" = "Coverage NTC Failure" ]; then
-  echo "${sid},${plearn_lineage},${plearn_pangoLEARN_ver},${plearn_status},none,none,none" > !{name}_harvest.csv
+  echo "${sid},${pusher_lineage},${pusher_version},${pusher_status},none,none,none" > !{name}_harvest.csv
 else
-  echo "${sid},${plearn_lineage},${plearn_pangoLEARN_ver},${plearn_status},none,none,none" > !{name}_harvest.csv
+  echo "${sid},${pusher_lineage},${pusher_version},${pusher_status},none,none,none" > !{name}_harvest.csv
 fi
 
 '''
@@ -485,7 +420,7 @@ process run_summary {
 
   shell:
 '''
-echo "id,run,guppyplexed_reads,cov_perc,cov_status,cov_confidence,vadr_status,plearn_lineage,plearn_scorpio,plearn_version,plearn_pangolin_ver,plearn_pangoLEARN_ver,plearn_pango_ver,plearn_status,plearn_note,pusher_lineage,pusher_version,pusher_status,pusher_note,pangolin_agreement" > temp.txt
+echo "id,run,guppyplexed_reads,cov_perc,cov_status,cov_confidence,vadr_status,pusher_lineage,pusher_version,pusher_status,pusher_note" > temp.txt
 
 cat *_summary.csv | sort >> temp.txt
 

@@ -6,22 +6,28 @@ primerset=$1
 extra_config=""
 
 # Make sure a valid primer set is given
-if [ "${primerset}" = "V4" ] || [ "${primerset}" = "V4.1" ] || [ "${primerset}" = "V1200" ]
+if [ "${primerset}" = "V4" ] || [ "${primerset}" = "V4.1" ] || [ "${primerset}" = "V1200" ] || [ "${primerset}" = "V4.1sup" ]
 then
   echo "Running analysis with ${primerset} primers"
 else
-  echo -e "\nInvalid Primerset:${primerset}\n\nPick one:V4,V4.1,V1200"
+  echo -e "\nInvalid Primerset:${primerset}\n\nPick one:V4,V4.1,V1200,V4.1sup"
   exit 1
 fi
 
 # Untested primer sets
 # ${primerset}" = "V1" ] || [ "${primerset}" = "V2" ] || [ "${primerset}" = "V3" ]
 
-
 # Additional processing for V1200
 if [ "${primerset}" = "V1200" ]
 then
   extra_config="-c /home/mdh/shared/software_modules/artic-mn/artic-mn/midnight.config"
+fi
+
+# Additional processing for V4sup
+if [ "${primerset}" = "V4.1sup" ]
+then
+  extra_config="--medaka_model r941_min_sup_g507"
+  primerset="V4.1"
 fi
 
 export NXF_OFFLINE='TRUE'
